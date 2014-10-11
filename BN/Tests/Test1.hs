@@ -25,6 +25,11 @@ test1ok
     putStrLn . show $ ps
 
 
+{- 
+    Right [("v1",0.25,0.75),("v2",1.0,0.0),("v3",0.9,0.1),("v4",0.435,0.565),("v5",0.45,0.55)]
+    
+    Same as SamIam too. :)
+-}
 test2ok :: IO ()
 test2ok
   = do

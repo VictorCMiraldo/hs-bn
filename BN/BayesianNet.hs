@@ -6,6 +6,7 @@
 
 This module provides a very naive implementation of Pearl's Inference
 algorithm on Bayesian Networks.
+-}
 module BN.BayesianNet(
   -- * Type Synonyms
     Prob, Val, Lbl, Type, GammaTable, BN
