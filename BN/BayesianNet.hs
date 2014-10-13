@@ -1,13 +1,15 @@
-{-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE TupleSections        #-}
-{-# LANGUAGE CPP                  #-}
+{-# LANGUAGE TypeSynonymInstances  #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE TupleSections         #-}
+{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-|BayesianNet
 
 This module provides a very naive implementation of Pearl's Inference
 algorithm on Bayesian Networks.
 -}
-module BN.BayesianNet(
+module BN.BayesianNet
+{-  (
   -- * Type Synonyms
     Prob, Val, Lbl, Type, GammaTable, BN
   
@@ -22,10 +24,11 @@ module BN.BayesianNet(
   , bnClear              
   , bnGetObs
   , bnDataFusion
-  )  where
+  ) -}  
+  where
 
 -- #define MSG_DOMAIN_CHECK 1
--- #define MSG_TRACE        1
+#define MSG_TRACE        1
 
 import BN.Common
 import BN.Types
@@ -35,6 +38,8 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.List((\\), sortBy)
 import Data.Function(on)
+
+import Control.Monad.Memo
 
 #ifdef MSG_TRACE
 import qualified Debug.Trace as T
@@ -258,7 +263,10 @@ bnGetObs lbl
 -- TODO: IMPLEMENT!!!
 
 -----------------------------------------------------------------------------------------------
--- * Pearl's Algorithm Specifics
+-- * Pearl's Algorithm Specifics (lowlevel)
+--
+-- This is a very low level and will trigger a lot of repeated computations.
+-- These functions are used as building blocks for the higher level 'BN'.
 
 -- ** Internal utilities
 
@@ -279,6 +287,74 @@ normalize ty f
     nvals <- __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
     let alpha = 1.0 / sum (map f nvals)
     return (\v -> alpha * f v)
+    
+-- |Parameters
+data Parm
+  = PLam  Lbl Lbl
+  | PLamC Lbl
+  | PPi   Lbl Lbl
+  | PPiC  Lbl
+  | PNul
+  deriving (Eq, Show, Ord)
+
+{- 
+instance MaybeLike Parm Parm where
+  nothing = PNul
+  
+  isNothing PNul = True
+  isNothing x    = False
+  
+  just = id
+  
+  fromJust = id
+-}
+  
+instance M m => M (MemoT i v m) where
+
+{-
+
+-- TODO: template for using ArrayCache's as memoization framework.
+
+indexParm :: (M m) => Parm -> BN m Int
+indexParm = undefined
+
+unindexParm :: (M m) => Int -> BN m Parm
+unindexParm = undefined
+    
+-- |Memoization wrapper for messages.
+memoParm :: (M m) => Parm -> BN (MemoT Int [(Val, Prob)] m) (Val -> Prob)
+memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
+  where
+    runMsgIndexed p = unindexParm p >>= runMsg
+  
+    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= tabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    
+    untabulate :: [(Val, Prob)] -> Val -> Prob
+    untabulate tab v
+      = (M.fromList tab) M.! v
+-}
+
+-- |Memoization wrapper for messages.
+memoParm :: (M m) => Parm -> BN (MemoT Parm [(Val, Prob)] m) (Val -> Prob)
+memoParm p = memol3 runMsg p >>= return . untabulate
+  where 
+    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= tabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    
+    untabulate :: [(Val, Prob)] -> Val -> Prob
+    untabulate tab v
+      = (M.fromList tab) M.! v
+      
+tabulate :: (M m) => Lbl -> (Val -> Prob) -> BN m [(Val, Prob)]
+tabulate l f
+  = do
+    tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
+    return [ (i, f i) | i <- tys ]
     
 -- |Computes the causal parameter @pi vi vo@ that @vo@ receives from @vi@.
 pPi, pPi' :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
