@@ -288,84 +288,11 @@ normalize ty f
     let alpha = 1.0 / sum (map f nvals)
     return (\v -> alpha * f v)
     
--- |Parameters
-data Parm
-  = PLam  Lbl Lbl
-  | PLamC Lbl
-  | PPi   Lbl Lbl
-  | PPiC  Lbl
-  | PNul
-  deriving (Eq, Show, Ord)
-
-{- 
-instance MaybeLike Parm Parm where
-  nothing = PNul
-  
-  isNothing PNul = True
-  isNothing x    = False
-  
-  just = id
-  
-  fromJust = id
--}
-  
-instance M m => M (MemoT i v m) where
-
-{-
-
--- TODO: template for using ArrayCache's as memoization framework.
-
-indexParm :: (M m) => Parm -> BN m Int
-indexParm = undefined
-
-unindexParm :: (M m) => Int -> BN m Parm
-unindexParm = undefined
-    
--- |Memoization wrapper for messages.
-memoParm :: (M m) => Parm -> BN (MemoT Int [(Val, Prob)] m) (Val -> Prob)
-memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
-  where
-    runMsgIndexed p = unindexParm p >>= runMsg
-  
-    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
-    runMsg (PLamC v)    = pLamC v    >>= tabulate v
-    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
-    runMsg (PPiC v)     = pPiC v     >>= tabulate v
-    
-    untabulate :: [(Val, Prob)] -> Val -> Prob
-    untabulate tab v
-      = (M.fromList tab) M.! v
--}
-
--- |Memoization wrapper for messages.
-memoParm :: (M m) => Parm -> BN (MemoT Parm [(Val, Prob)] m) (Val -> Prob)
-memoParm p = memol3 runMsg p >>= return . untabulate
-  where 
-    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
-    runMsg (PLamC v)    = pLamC v    >>= tabulate v
-    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
-    runMsg (PPiC v)     = pPiC v     >>= tabulate v
-    
-    untabulate :: [(Val, Prob)] -> Val -> Prob
-    untabulate tab v
-      = (M.fromList tab) M.! v
-      
-tabulate :: (M m) => Lbl -> (Val -> Prob) -> BN m [(Val, Prob)]
-tabulate l f
-  = do
-    tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
-    return [ (i, f i) | i <- tys ]
+-- ** Explicit Parameters
     
 -- |Computes the causal parameter @pi vi vo@ that @vo@ receives from @vi@.
-pPi, pPi' :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
-#ifdef MSG_TRACE
-pPi vi vo = T.trace ("pi " ++ vi ++ " " ++ vo) (return ())
-         >> pPi' vi vo
-#else
-pPi vi vo = pPi' vi vo
-#endif
-
-pPi' vi vo = bnGetObs vi >>= maybe (piNoInst vi vo) (piInst vi vo)
+pPi :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
+pPi vi vo = bnGetObs vi >>= maybe (piNoInst vi vo) (piInst vi vo)
   where
 -- MSG_DOMAIN_CHECK will add a domain-check in messages transmitted from one
 -- node to another. Might me usefull if the user is going to use this messages by
@@ -393,15 +320,8 @@ pPi' vi vo = bnGetObs vi >>= maybe (piNoInst vi vo) (piInst vi vo)
 
 
 -- |Computes the compound causal parameter for node @vi@.
-pPiC, pPiC' :: (M m) => Lbl -> BN m (Val -> Prob)
-#ifdef MSG_TRACE
-pPiC vi = T.trace ("pic " ++ vi) (return ())
-       >> pPiC' vi
-#else
-pPiC vi = pPiC' vi
-#endif
-
-pPiC' vi
+pPiC :: (M m) => Lbl -> BN m (Val -> Prob)
+pPiC vi
   = do
     -- get every parent
     parents <- S.toList <$> __bnGraphF (esNodeRho vi)
@@ -425,15 +345,8 @@ pPiC' vi
     
      
 -- |Computes the diagnostic parameter for a given node
-pLam, pLam' :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
-#ifdef MSG_TRACE
-pLam vi vo = T.trace ("lam " ++ vi ++ " " ++ vo) (return ())
-         >> pLam' vi vo
-#else
-pLam vi vo = pLam' vi vo
-#endif
-
-pLam' vi vo 
+pLam :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
+pLam vi vo 
   = do
     obs <- bnobs <$> get
     if obs == []
@@ -479,25 +392,104 @@ pLam' vi vo
         return (g voc * beta)
 
 -- |Computes the compound diagnostic parameter for a given node.
-pLamC, pLamC' :: (M m) => Lbl -> BN m (Val -> Prob)
-#ifdef MSG_TRACE
-pLamC v = T.trace ("lamc " ++ v) (return ())
-         >> pLamC' v
-#else
-pLamC v = pLamC' v
-#endif
-
-pLamC' v = __bnGraphF (esNodeSigma v) >>= mapM (pLam v) . S.toList >>= return . prod
+pLamC :: (M m) => Lbl -> BN m (Val -> Prob)
+pLamC v = __bnGraphF (esNodeSigma v) >>= mapM (pLam v) . S.toList >>= return . prod
 
 -----------------------------------------------------------------------------------------------
--- * Data Fusion Lemma
+-- * Pearl's Algorithm Interface
+--
+-- This interface adds memoization to the stir.
 
-bnDataFusion :: (M m) => Lbl -> BN m (Val -> Prob)
+{-
+
+-- TODO: template for using ArrayCache's as memoization framework.
+-- TODO: use a monad writter to trace messages?
+
+indexParm :: (M m) => Parm -> BN m Int
+indexParm = undefined
+
+unindexParm :: (M m) => Int -> BN m Parm
+unindexParm = undefined
+    
+-- |Memoization wrapper for messages.
+memoParm :: (M m) => Parm -> BN (MemoT Int [(Val, Prob)] m) (Val -> Prob)
+memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
+  where
+    runMsgIndexed p = unindexParm p >>= runMsg
+  
+    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= tabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    
+    untabulate :: [(Val, Prob)] -> Val -> Prob
+    untabulate tab v
+      = (M.fromList tab) M.! v
+-}
+
+-- |Parameters
+data Parm
+  = PLam  Lbl Lbl
+  | PLamC Lbl
+  | PPi   Lbl Lbl
+  | PPiC  Lbl
+  | PNul
+  deriving (Eq, Show, Ord)
+  
+instance M m => M (MemoT i v m) where
+
+-- |Adding memoization;
+--  The advantage of adding MemoT to the first layer is the option to reuse the
+--  code written so far without any kind of lifting involved.
+type BayesT m = BN (MemoT Parm [(Val, Prob)] m)
+
+-- |Unwraps a BayesT computation
+runBayesT :: (M m) => [(Type, [Val])] -> BayesT m a -> m (Either BError a)
+runBayesT tys f = startEvalMemoT $ runBN tys f
+
+-- |Memoization wrapper for messages.
+memoParm :: (M m) => Parm -> BayesT m (Val -> Prob)
+memoParm p = traceMe p >> memol3 runMsg p >>= return . untabulate
+  where 
+#ifdef MSG_TRACE
+    traceMe p = T.trace (show p) (return ())
+#else
+    traceMe _ = return ()
+#endif
+
+    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= tabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    
+    untabulate :: [(Val, Prob)] -> Val -> Prob
+    untabulate tab v
+      = (M.fromList tab) M.! v
+      
+tabulate :: (M m) => Lbl -> (Val -> Prob) -> BN m [(Val, Prob)]
+tabulate l f
+  = do
+    tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
+    return [ (i, f i) | i <- tys ]
+      
+-- |Wrapping of parameters under the memoization interface
+pi, lam :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
+pi  vi vo = memoParm (PPi vi vo)
+lam vi vo = memoParm (PLam vi vo)
+
+-- |Wrapping of compound parameters under the memoization interface
+piC, lamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
+piC  v = memoParm (PPiC v)
+lamC v = memoParm (PLamC v)
+
+-- ** Data Fusion Lemma
+
+bnDataFusion :: (M m) => Lbl -> BayesT m (Val -> Prob)
 bnDataFusion lbl
   = do
     ty <- bnodeVarType <$> __bnGetNode lbl
-    l  <- pLamC lbl
-    p  <- pPiC  lbl
+    l  <- lamC lbl
+    p  <- piC  lbl
     normalize ty (prod [p, l])
      
      

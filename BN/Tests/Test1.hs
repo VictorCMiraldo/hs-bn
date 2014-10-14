@@ -4,7 +4,6 @@ module Test1 where
 
 import BN.Common
 import BN.BayesianNet
-import BN.BayesT
 
 import qualified Data.Map as M
 
@@ -25,7 +24,7 @@ runTestBayesT f = runIdentity $ runBayesT [("bool", ["T", "F"])] f
 test1ok :: IO ()
 test1ok
   = do
-    let ps = runTest (setupOk >> getPs ["v1", "v2", "v3", "v4", "v5"])
+    let ps = runTestBayesT (setupOk >> getPs ["v1", "v2", "v3", "v4", "v5"])
     putStrLn . show $ ps
 
 
@@ -37,7 +36,7 @@ test1ok
 test2ok :: IO ()
 test2ok
   = do
-    let ps = runTest (do 
+    let ps = runTestBayesT (do 
         setupOk
         bnObserve "v2" "T"
         getPs ["v1", "v2", "v3", "v4", "v5"])
@@ -47,7 +46,7 @@ test2ok
 -- * Setup Testing
 
 -- Sucessfull setup.
-setupOk :: (M m) => BN m ()
+setupOk :: (M m) => BayesT m ()
 setupOk
   = do
     mapM_ (flip bnAddNode "bool") ["v1", "v2", "v3", "v4", "v5"]
@@ -88,7 +87,7 @@ setupOk
         ]
         
 -- Erroneous setup, probabilities do not sum to 1.
-setupErr1 :: (M m) => BN m ()
+setupErr1 :: (M m) => BayesT m ()
 setupErr1
   = do
     mapM_ (flip bnAddNode "bool") ["v1", "v2", "v3", "v4", "v5"]
@@ -129,7 +128,7 @@ setupErr1
         ]
         
 -- Erroneous setup, assessment tables incomplete.
-setupErr2 :: (M m) => BN m ()
+setupErr2 :: (M m) => BayesT m ()
 setupErr2
   = do
     mapM_ (flip bnAddNode "bool") ["v1", "v2", "v3", "v4", "v5"]
@@ -172,7 +171,7 @@ setupErr2
 -----------------------------------------------------------------------------------------------
 -- * Reading all Priors
 
-getPs :: (M m) => [Lbl] -> BN m [(Lbl, Prob, Prob)]
+getPs :: (M m) => [Lbl] -> BayesT m [(Lbl, Prob, Prob)]
 getPs ls
   = do
     pvs <- mapM bnDataFusion ls
