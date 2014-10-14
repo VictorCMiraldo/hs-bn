@@ -91,9 +91,9 @@ bnodeDummyName l = '_':'_':l
 type IMap = EdgeSet (Lbl, Lbl) Lbl
   
 data BayesianNetData = BND
-  { bnnodes :: M.Map Lbl BNode
-  , bngraph :: IMap
-  , bnobs   :: [Lbl]
+  { bnnodes  :: M.Map Lbl BNode
+  , bngraph  :: IMap
+  , bnobs    :: [Lbl]
   }
   
 type BN m = StateT BayesianNetData (Err (Ty m))
@@ -258,6 +258,38 @@ bnGetObs lbl
                  (return . Just . bnodeDummyVal) 
                  $ M.lookup (bnodeDummyName lbl) (bnnodes s)
       else return Nothing
+      
+-----------------------------------------------------------------------------------------------
+-- * Mathematical Utilities
+
+-- |Compute the product of a list of functions
+prod :: [Val -> Prob] -> Val -> Prob
+prod fs b = foldr (\h r -> h b * r) 1 fs
+
+-- |Computes the summation of a list of functions
+summ :: [Val -> Prob] -> Val -> Prob
+summ fs b = foldr (\h r -> h b + r) 0 fs
+
+-- |Dirac function
+dirac :: Lbl -> Val -> [Val] -> Val -> Prob
+dirac n v vs i
+  | i `elem` vs = if i == v then 1.0 else 0.0
+  | otherwise   = error $ i ++ " should be an element of {" ++ unwords vs ++ "}"
+
+-- |Function Normalization
+normalize :: (M m) => Type -> (Val -> Prob) -> BayesT m (Val -> Prob)
+normalize ty f
+  = do
+    nvals <- lift $ __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
+    let alpha = 1.0 / sum (map f nvals)
+    return (\v -> alpha * f v)
+    
+-- |Isomorphism between functions and maps.
+bnTabulate :: (M m) => Lbl -> (Val -> Prob) -> BayesT m [(Val, Prob)]
+bnTabulate l f
+  = do
+    tys <- lift $ __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
+    return [ (i, f i) | i <- tys ]
                         
 -----------------------------------------------------------------------------------------------
 -- * Loop Cutset
@@ -265,7 +297,7 @@ bnGetObs lbl
 -- TODO: IMPLEMENT!!!
 
 -----------------------------------------------------------------------------------------------
--- * Pearl's Algorithm Specifics (lowlevel)
+-- * Pearl's Algorithm
 --
 -- This is a very low level and will trigger a lot of repeated computations.
 -- These functions are used as building blocks for the higher level 'BayesT'.
@@ -275,11 +307,15 @@ instance M m => M (MemoT i v m) where
 -- |Adding memoization;
 --  The advantage of adding MemoT to the first layer is the option to reuse the
 --  code written so far without any kind of lifting involved.
-type BayesT m = BN (MemoT Parm [(Val, Prob)] m)
+type BayesT m = MemoT Parm [(Val, Prob)] (BN m)
 
 -- |Unwraps a BayesT computation
-runBayesT :: (M m) => [(Type, [Val])] -> BayesT m a -> m (Either BError a)
-runBayesT tys f = startEvalMemoT $ runBN tys f
+runBayesT :: (M m) => BayesT m a -> BN m a
+runBayesT = startEvalMemoT
+
+-- |Same as unwrapping
+bnQuery :: (M m) => BayesT m a -> BN m a
+bnQuery = runBayesT
 
 -- |Parameters
 data Parm
@@ -300,135 +336,6 @@ piC, lamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
 piC  v = memoParm (PPiC v)
 lamC v = memoParm (PLamC v)
 
--- ** Internal utilities
-
-prod :: [Val -> Prob] -> Val -> Prob
-prod fs b = foldr (\h r -> h b * r) 1 fs
-
-summ :: [Val -> Prob] -> Val -> Prob
-summ fs b = foldr (\h r -> h b + r) 0 fs
-
-dirac :: Lbl -> Val -> [Val] -> Val -> Prob
-dirac n v vs i
-  | i `elem` vs = if i == v then 1.0 else 0.0
-  | otherwise   = error $ i ++ " should be an element of {" ++ unwords vs ++ "}"
-
-normalize :: (M m) => Type -> (Val -> Prob) -> BN m (Val -> Prob)
-normalize ty f
-  = do
-    nvals <- __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
-    let alpha = 1.0 / sum (map f nvals)
-    return (\v -> alpha * f v)
-    
--- ** Explicit Parameters
-    
--- |Computes the causal parameter @pi vi vo@ that @vo@ receives from @vi@.
-pPi :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
-pPi vi vo = bnGetObs vi >>= maybe (piNoInst vi vo) (piInst vi vo)
-  where
--- MSG_DOMAIN_CHECK will add a domain-check in messages transmitted from one
--- node to another. Might me usefull if the user is going to use this messages by
--- hand.
-#ifndef MSG_DOMAIN_CHECK
-    piInst vi vo b
-      = return (\b' -> if b == b' then 1.0 else 0.0)
-#else
-    piInst vi vo b
-      = do
-        domain <- __bnTyL (tyValsFor vi) >>= maybe (panic "piInst") return
-        return (\b' -> if b' `elem` domain
-                       then if b == b' then 1.0 else 0.0
-                       else error $ b' ++ " does not belong to {" ++ unwords domain 
-                                       ++ "}, in pPi " ++ vi ++ " " ++ vo)
-#endif
-
-    piNoInst vi vo
-      = do
-        vic      <- piC vi
-        vitype   <- bnodeVarType <$> __bnGetNode vi
-        children <- S.toList <$> __bnGraphF (esNodeSigma vi)
-        lams     <- mapM (lam vi) children
-        normalize vitype (prod $ vic : lams)
-
-
--- |Computes the compound causal parameter for node @vi@.
-pPiC :: (M m) => Lbl -> BayesT m (Val -> Prob)
-pPiC vi
-  = do
-    -- get every parent
-    parents <- S.toList <$> __bnGraphF (esNodeRho vi)
-    
-    -- "receive" the causal parameters from each parent.
-    sppis   <- mapM (\p -> pi p vi) parents
-    
-    -- computes every possible configuration for my parents.
-    pconfs  <- __bnTyL (tyConfs parents) 
-               >>= maybe (panic "BayesianNet.hs:233") return
-               
-    summ <$> mapM (mkFactor sppis) pconfs
-  where
-    -- mks a factor. I'm assuming that conf and sppi are in the same order.
-    mkFactor :: (M m) => [Val -> Prob] -> [(Lbl, Val)] -> BayesT m (Val -> Prob)
-    mkFactor sppis conf
-      = do
-        g <- bnGammaLkup vi conf 
-        let r = product $ map (\(pi, c) -> pi c) (zip sppis (map snd conf))
-        return (\b -> g b * r) 
-    
-     
--- |Computes the diagnostic parameter for a given node
-pLam :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
-pLam vi vo 
-  = do
-    obs <- bnobs <$> get
-    if obs == []
-      then return $ const 1.0 -- if there are no observations, all diagnostic parameters are 1.0.
-      else lamObs vi vo
-  where
-    lamObs vi ovo@('_':'_':vo)
-      = do
-        vovals <- __bnTyL (tyValsFor vo) >>= maybe (panic "lamObs, __, tyValsFor") return
-        obsval <- bnodeDummyVal <$> __bnGetNode ovo
-        return (dirac vo obsval vovals)
-    lamObs vi vo
-      = do
-        rho'  <- S.toList . (S.\\ (S.singleton vi)) <$> __bnGraphF (esNodeRho vo)
-        crho' <- __bnTyL (tyConfs rho') >>= maybe (panic "lamObs, tyConfs") return
-        vocs  <- __bnTyL (tyValsFor vo) >>= maybe (panic "lamObs, tyValsFor") return
-        summ <$> mapM (mkOuterFactor crho' vi vo) vocs
-        
-    mkOuterFactor :: (M m) => [[(Lbl, Val)]] -> Lbl -> Lbl -> Val -> BayesT m (Val -> Prob)
-    mkOuterFactor crho' vi vo voc
-      = do
-        l     <- lamC vo 
-        let inner = map (mkInnerFactor vi vo voc) crho' -- :: [Val -> BN m Prob]
-        
-        -- now, we preconpute the inner possible 
-        -- values and build a suitably typed Haskell function.
-        vivals <- __bnTyL (tyValsFor vi) >>= maybe (panic "mkOuterFactor") return
-        vs     <- map buildFunction <$> mapM (flip precompute vivals) inner
-        
-        return (\vic -> l voc * (summ vs) vic)
-        
-    precompute :: (M m) => (Val -> BayesT m Prob) -> [Val] -> BayesT m [(Val, Prob)]
-    precompute innerf vals = mapM (\v -> innerf v >>= return . (v,)) vals
-    
-    buildFunction :: (Ord a) => [(a, b)] -> a -> b
-    buildFunction dict a = (M.fromList dict) M.! a
-     
-    mkInnerFactor :: (M m) => Lbl -> Lbl -> Val -> [(Lbl, Val)] -> Val -> BayesT m Prob   
-    mkInnerFactor vi vo voc crho vic
-      = do
-        beta <- product <$> mapM (\(b, bv) -> pi b vo >>= return . ($ bv)) crho
-        g <- bnGammaLkup vo ((vi, vic) : crho) 
-        return (g voc * beta)
-
--- |Computes the compound diagnostic parameter for a given node.
-pLamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
-pLamC v = __bnGraphF (esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
-
------------------------------------------------------------------------------------------------
--- * Pearl's Algorithm Interface
 --
 -- This interface adds memoization to the stir.
 
@@ -461,7 +368,7 @@ memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
 
 -- |Memoization wrapper for messages.
 memoParm :: (M m) => Parm -> BayesT m (Val -> Prob)
-memoParm p = memol3 runMsg' p >>= return . untabulate
+memoParm p = memo runMsg' p >>= return . untabulate
   where 
     runMsg' p = traceMe p >> runMsg p
   
@@ -471,30 +378,132 @@ memoParm p = memol3 runMsg' p >>= return . untabulate
     traceMe _ = return ()
 #endif
 
-    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
-    runMsg (PLamC v)    = pLamC v    >>= tabulate v
-    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
-    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    runMsg (PLam vi vo) = pLam vi vo >>= bnTabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= bnTabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= bnTabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= bnTabulate v
     
     untabulate :: [(Val, Prob)] -> Val -> Prob
     untabulate tab v
       = (M.fromList tab) M.! v
-      
-tabulate :: (M m) => Lbl -> (Val -> Prob) -> BN m [(Val, Prob)]
-tabulate l f
-  = do
-    tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
-    return [ (i, f i) | i <- tys ]
 
 -- ** Data Fusion Lemma
 
 bnDataFusion :: (M m) => Lbl -> BayesT m (Val -> Prob)
 bnDataFusion lbl
   = do
-    ty <- bnodeVarType <$> __bnGetNode lbl
+    ty <- lift $ bnodeVarType <$> __bnGetNode lbl
     l  <- lamC lbl
     p  <- piC  lbl
     normalize ty (prod [p, l])
+    
+-----------------------------------------------------------------------------------------------
+-- * Pearl's Algorithm Low Level Interface
+    
+-- |Computes the causal parameter @pi vi vo@ that @vo@ receives from @vi@.
+pPi :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
+pPi vi vo = lift (bnGetObs vi) >>= maybe (piNoInst vi vo) (piInst vi vo)
+  where
+-- MSG_DOMAIN_CHECK will add a domain-check in messages transmitted from one
+-- node to another. Might me usefull if the user is going to use this messages by
+-- hand.
+#ifndef MSG_DOMAIN_CHECK
+    piInst vi vo b
+      = return (\b' -> if b == b' then 1.0 else 0.0)
+#else
+    piInst vi vo b
+      = do
+        domain <- lift $ __bnTyL (tyValsFor vi) >>= maybe (panic "piInst") return
+        return (\b' -> if b' `elem` domain
+                       then if b == b' then 1.0 else 0.0
+                       else error $ b' ++ " does not belong to {" ++ unwords domain 
+                                       ++ "}, in pPi " ++ vi ++ " " ++ vo)
+#endif
+
+    piNoInst vi vo
+      = do
+        vic      <- piC vi
+        vitype   <- lift $ bnodeVarType <$> __bnGetNode vi
+        children <- lift $ S.toList     <$> __bnGraphF (esNodeSigma vi)
+        lams     <- mapM (lam vi) children
+        normalize vitype (prod $ vic : lams)
+
+
+-- |Computes the compound causal parameter for node @vi@.
+pPiC :: (M m) => Lbl -> BayesT m (Val -> Prob)
+pPiC vi
+  = do
+    -- get every parent
+    parents <- lift $ S.toList <$> __bnGraphF (esNodeRho vi)
+    
+    -- "receive" the causal parameters from each parent.
+    sppis   <- mapM (\p -> pi p vi) parents
+    
+    -- computes every possible configuration for my parents.
+    pconfs  <- lift $ __bnTyL (tyConfs parents) 
+               >>= maybe (panic "BayesianNet.hs:233") return
+               
+    summ <$> mapM (mkFactor sppis) pconfs
+  where
+    -- mks a factor. I'm assuming that conf and sppi are in the same order.
+    mkFactor :: (M m) => [Val -> Prob] -> [(Lbl, Val)] -> BayesT m (Val -> Prob)
+    mkFactor sppis conf
+      = do
+        g <- lift $ bnGammaLkup vi conf 
+        let r = product $ map (\(pi, c) -> pi c) (zip sppis (map snd conf))
+        return (\b -> g b * r) 
+    
+     
+-- |Computes the diagnostic parameter for a given node
+pLam :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
+pLam vi vo 
+  = do
+    obs <- lift $ bnobs <$> get
+    if obs == []
+      then return $ const 1.0 -- if there are no observations, all diagnostic parameters are 1.0.
+      else lamObs vi vo
+  where
+    lamObs vi ovo@('_':'_':vo)
+      = do
+        vovals <- lift $ __bnTyL (tyValsFor vo) >>= maybe (panic "lamObs, __, tyValsFor") return
+        obsval <- lift $ bnodeDummyVal <$> __bnGetNode ovo
+        return (dirac vo obsval vovals)
+    lamObs vi vo
+      = do
+        rho'  <- lift $ S.toList . (S.\\ (S.singleton vi)) <$> __bnGraphF (esNodeRho vo)
+        crho' <- lift $ __bnTyL (tyConfs rho') >>= maybe (panic "lamObs, tyConfs") return
+        vocs  <- lift $ __bnTyL (tyValsFor vo) >>= maybe (panic "lamObs, tyValsFor") return
+        summ <$> mapM (mkOuterFactor crho' vi vo) vocs
+        
+    mkOuterFactor :: (M m) => [[(Lbl, Val)]] -> Lbl -> Lbl -> Val -> BayesT m (Val -> Prob)
+    mkOuterFactor crho' vi vo voc
+      = do
+        l     <- lamC vo 
+        let inner = map (mkInnerFactor vi vo voc) crho' -- :: [Val -> BayesT m Prob]
+        
+        -- now, we preconpute the inner possible 
+        -- values and build a suitably typed Haskell function.
+        vivals <- lift $ __bnTyL (tyValsFor vi) >>= maybe (panic "mkOuterFactor") return
+        vs     <- map buildFunction <$> mapM (flip precompute vivals) inner
+        
+        return (\vic -> l voc * (summ vs) vic)
+        
+    precompute :: (M m) => (Val -> BayesT m Prob) -> [Val] -> BayesT m [(Val, Prob)]
+    precompute innerf vals = mapM (\v -> innerf v >>= return . (v,)) vals
+    
+    buildFunction :: (Ord a) => [(a, b)] -> a -> b
+    buildFunction dict a = (M.fromList dict) M.! a
+     
+    mkInnerFactor :: (M m) => Lbl -> Lbl -> Val -> [(Lbl, Val)] -> Val -> BayesT m Prob   
+    mkInnerFactor vi vo voc crho vic
+      = do
+        beta <- product <$> mapM (\(b, bv) -> pi b vo >>= return . ($ bv)) crho
+        g <- lift $ bnGammaLkup vo ((vi, vic) : crho) 
+        return (g voc * beta)
+
+-- |Computes the compound diagnostic parameter for a given node.
+pLamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
+pLamC v = lift (__bnGraphF $ esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
      
      
         

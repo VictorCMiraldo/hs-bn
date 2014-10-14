@@ -13,9 +13,6 @@ import qualified Data.Map as M
 runTest :: BN Identity a -> Either BError a
 runTest f = runIdentity $ runBN [("bool", ["T", "F"])] f
 
-runTestBayesT :: BayesT Identity a -> Either BError a
-runTestBayesT f = runIdentity $ runBayesT [("bool", ["T", "F"])] f
-
 {-
     Right [("v1",0.2,0.8),("v2",0.32000002,0.68),("v3",0.42400002,0.57600003),("v4",0.27112,0.72888),("v5",0.45,0.55)]
     
@@ -24,29 +21,38 @@ runTestBayesT f = runIdentity $ runBayesT [("bool", ["T", "F"])] f
 test1ok :: IO ()
 test1ok
   = do
-    let ps = runTestBayesT (setupOk >> getPs ["v1", "v2", "v3", "v4", "v5"])
+    let ps = runTest $ setupOk >> bnQuery (getPs ["v1", "v2", "v3", "v4", "v5"])
     putStrLn . show $ ps
 
 
 {- 
+    
+    v2 = T
     Right [("v1",0.25,0.75),("v2",1.0,0.0),("v3",0.9,0.1),("v4",0.435,0.565),("v5",0.45,0.55)]
+    
+    v2 = T && v5 = F
+    Right [("v1",0.25,0.75),("v2",1.0,0.0),("v3",0.9,0.1),("v4",0.3,0.7),("v5",0.0,1.0)]
     
     Same as SamIam too. :)
 -}
 test2ok :: IO ()
 test2ok
   = do
-    let ps = runTestBayesT (do 
+    let (Right (p1, p2)) = runTest (do 
         setupOk
         bnObserve "v2" "T"
-        getPs ["v1", "v2", "v3", "v4", "v5"])
-    putStrLn . show $ ps
+        x <- bnQuery $ getPs ["v1", "v2", "v3", "v4", "v5"]
+        bnObserve "v5" "F"
+        y <- bnQuery $ getPs ["v1", "v2", "v3", "v4", "v5"]
+        return (x, y))
+    putStrLn . show $ p1
+    putStrLn . show $ p2
 
 -----------------------------------------------------------------------------------------------
 -- * Setup Testing
 
 -- Sucessfull setup.
-setupOk :: (M m) => BayesT m ()
+setupOk :: (M m) => BN m ()
 setupOk
   = do
     mapM_ (flip bnAddNode "bool") ["v1", "v2", "v3", "v4", "v5"]
@@ -87,7 +93,7 @@ setupOk
         ]
         
 -- Erroneous setup, probabilities do not sum to 1.
-setupErr1 :: (M m) => BayesT m ()
+setupErr1 :: (M m) => BN m ()
 setupErr1
   = do
     mapM_ (flip bnAddNode "bool") ["v1", "v2", "v3", "v4", "v5"]
@@ -128,7 +134,7 @@ setupErr1
         ]
         
 -- Erroneous setup, assessment tables incomplete.
-setupErr2 :: (M m) => BayesT m ()
+setupErr2 :: (M m) => BN m ()
 setupErr2
   = do
     mapM_ (flip bnAddNode "bool") ["v1", "v2", "v3", "v4", "v5"]
