@@ -27,8 +27,10 @@ module BN.BayesianNet
   ) -}  
   where
 
--- #define MSG_DOMAIN_CHECK 1
+#define MSG_DOMAIN_CHECK 1
 #define MSG_TRACE        1
+
+import Prelude hiding (pi)
 
 import BN.Common
 import BN.Types
@@ -266,7 +268,37 @@ bnGetObs lbl
 -- * Pearl's Algorithm Specifics (lowlevel)
 --
 -- This is a very low level and will trigger a lot of repeated computations.
--- These functions are used as building blocks for the higher level 'BN'.
+-- These functions are used as building blocks for the higher level 'BayesT'.
+
+instance M m => M (MemoT i v m) where
+
+-- |Adding memoization;
+--  The advantage of adding MemoT to the first layer is the option to reuse the
+--  code written so far without any kind of lifting involved.
+type BayesT m = BN (MemoT Parm [(Val, Prob)] m)
+
+-- |Unwraps a BayesT computation
+runBayesT :: (M m) => [(Type, [Val])] -> BayesT m a -> m (Either BError a)
+runBayesT tys f = startEvalMemoT $ runBN tys f
+
+-- |Parameters
+data Parm
+  = PLam  Lbl Lbl
+  | PLamC Lbl
+  | PPi   Lbl Lbl
+  | PPiC  Lbl
+  | PNul
+  deriving (Eq, Show, Ord)
+
+-- |Wrapping of parameters under the memoization interface
+pi, lam :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
+pi  vi vo = memoParm (PPi vi vo)
+lam vi vo = memoParm (PLam vi vo)
+
+-- |Wrapping of compound parameters under the memoization interface
+piC, lamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
+piC  v = memoParm (PPiC v)
+lamC v = memoParm (PLamC v)
 
 -- ** Internal utilities
 
@@ -291,7 +323,7 @@ normalize ty f
 -- ** Explicit Parameters
     
 -- |Computes the causal parameter @pi vi vo@ that @vo@ receives from @vi@.
-pPi :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
+pPi :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
 pPi vi vo = bnGetObs vi >>= maybe (piNoInst vi vo) (piInst vi vo)
   where
 -- MSG_DOMAIN_CHECK will add a domain-check in messages transmitted from one
@@ -312,22 +344,22 @@ pPi vi vo = bnGetObs vi >>= maybe (piNoInst vi vo) (piInst vi vo)
 
     piNoInst vi vo
       = do
-        vic      <- pPiC vi
+        vic      <- piC vi
         vitype   <- bnodeVarType <$> __bnGetNode vi
         children <- S.toList <$> __bnGraphF (esNodeSigma vi)
-        lams     <- mapM (pLam vi) children
+        lams     <- mapM (lam vi) children
         normalize vitype (prod $ vic : lams)
 
 
 -- |Computes the compound causal parameter for node @vi@.
-pPiC :: (M m) => Lbl -> BN m (Val -> Prob)
+pPiC :: (M m) => Lbl -> BayesT m (Val -> Prob)
 pPiC vi
   = do
     -- get every parent
     parents <- S.toList <$> __bnGraphF (esNodeRho vi)
     
     -- "receive" the causal parameters from each parent.
-    sppis   <- mapM (\p -> pPi p vi) parents
+    sppis   <- mapM (\p -> pi p vi) parents
     
     -- computes every possible configuration for my parents.
     pconfs  <- __bnTyL (tyConfs parents) 
@@ -336,7 +368,7 @@ pPiC vi
     summ <$> mapM (mkFactor sppis) pconfs
   where
     -- mks a factor. I'm assuming that conf and sppi are in the same order.
-    mkFactor :: (M m) => [Val -> Prob] -> [(Lbl, Val)] -> BN m (Val -> Prob)
+    mkFactor :: (M m) => [Val -> Prob] -> [(Lbl, Val)] -> BayesT m (Val -> Prob)
     mkFactor sppis conf
       = do
         g <- bnGammaLkup vi conf 
@@ -345,7 +377,7 @@ pPiC vi
     
      
 -- |Computes the diagnostic parameter for a given node
-pLam :: (M m) => Lbl -> Lbl -> BN m (Val -> Prob)
+pLam :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
 pLam vi vo 
   = do
     obs <- bnobs <$> get
@@ -365,10 +397,10 @@ pLam vi vo
         vocs  <- __bnTyL (tyValsFor vo) >>= maybe (panic "lamObs, tyValsFor") return
         summ <$> mapM (mkOuterFactor crho' vi vo) vocs
         
-    mkOuterFactor :: (M m) => [[(Lbl, Val)]] -> Lbl -> Lbl -> Val -> BN m (Val -> Prob)
+    mkOuterFactor :: (M m) => [[(Lbl, Val)]] -> Lbl -> Lbl -> Val -> BayesT m (Val -> Prob)
     mkOuterFactor crho' vi vo voc
       = do
-        l     <- pLamC vo 
+        l     <- lamC vo 
         let inner = map (mkInnerFactor vi vo voc) crho' -- :: [Val -> BN m Prob]
         
         -- now, we preconpute the inner possible 
@@ -378,22 +410,22 @@ pLam vi vo
         
         return (\vic -> l voc * (summ vs) vic)
         
-    precompute :: (M m) => (Val -> BN m Prob) -> [Val] -> BN m [(Val, Prob)]
+    precompute :: (M m) => (Val -> BayesT m Prob) -> [Val] -> BayesT m [(Val, Prob)]
     precompute innerf vals = mapM (\v -> innerf v >>= return . (v,)) vals
     
     buildFunction :: (Ord a) => [(a, b)] -> a -> b
     buildFunction dict a = (M.fromList dict) M.! a
      
-    mkInnerFactor :: (M m) => Lbl -> Lbl -> Val -> [(Lbl, Val)] -> Val -> BN m Prob   
+    mkInnerFactor :: (M m) => Lbl -> Lbl -> Val -> [(Lbl, Val)] -> Val -> BayesT m Prob   
     mkInnerFactor vi vo voc crho vic
       = do
-        beta <- product <$> mapM (\(b, bv) -> pPi b vo >>= return . ($ bv)) crho
+        beta <- product <$> mapM (\(b, bv) -> pi b vo >>= return . ($ bv)) crho
         g <- bnGammaLkup vo ((vi, vic) : crho) 
         return (g voc * beta)
 
 -- |Computes the compound diagnostic parameter for a given node.
-pLamC :: (M m) => Lbl -> BN m (Val -> Prob)
-pLamC v = __bnGraphF (esNodeSigma v) >>= mapM (pLam v) . S.toList >>= return . prod
+pLamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
+pLamC v = __bnGraphF (esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
 
 -----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Interface
@@ -427,30 +459,12 @@ memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
       = (M.fromList tab) M.! v
 -}
 
--- |Parameters
-data Parm
-  = PLam  Lbl Lbl
-  | PLamC Lbl
-  | PPi   Lbl Lbl
-  | PPiC  Lbl
-  | PNul
-  deriving (Eq, Show, Ord)
-  
-instance M m => M (MemoT i v m) where
-
--- |Adding memoization;
---  The advantage of adding MemoT to the first layer is the option to reuse the
---  code written so far without any kind of lifting involved.
-type BayesT m = BN (MemoT Parm [(Val, Prob)] m)
-
--- |Unwraps a BayesT computation
-runBayesT :: (M m) => [(Type, [Val])] -> BayesT m a -> m (Either BError a)
-runBayesT tys f = startEvalMemoT $ runBN tys f
-
 -- |Memoization wrapper for messages.
 memoParm :: (M m) => Parm -> BayesT m (Val -> Prob)
-memoParm p = traceMe p >> memol3 runMsg p >>= return . untabulate
+memoParm p = memol3 runMsg' p >>= return . untabulate
   where 
+    runMsg' p = traceMe p >> runMsg p
+  
 #ifdef MSG_TRACE
     traceMe p = T.trace (show p) (return ())
 #else
@@ -471,16 +485,6 @@ tabulate l f
   = do
     tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
     return [ (i, f i) | i <- tys ]
-      
--- |Wrapping of parameters under the memoization interface
-pi, lam :: (M m) => Lbl -> Lbl -> BayesT m (Val -> Prob)
-pi  vi vo = memoParm (PPi vi vo)
-lam vi vo = memoParm (PLam vi vo)
-
--- |Wrapping of compound parameters under the memoization interface
-piC, lamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
-piC  v = memoParm (PPiC v)
-lamC v = memoParm (PLamC v)
 
 -- ** Data Fusion Lemma
 
