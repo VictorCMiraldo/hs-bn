@@ -26,6 +26,9 @@ runTyped tys = let ns = map fst tys
              where
                -- no empty types allowed.
                validTypes = all ((> 0) . length . snd)
+               
+runTypedFor :: (M m) => TyDict -> Ty m a -> m a
+runTypedFor tdict = flip evalStateT tdict
 
 -----------------------------------------------------------------------------------------------
 -- * Interface

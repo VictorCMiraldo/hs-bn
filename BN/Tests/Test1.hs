@@ -177,7 +177,7 @@ setupErr2
 -----------------------------------------------------------------------------------------------
 -- * Reading all Priors
 
-getPs :: (M m) => [Lbl] -> BayesT m [(Lbl, Prob, Prob)]
+getPs :: (M m) => [Lbl] -> QueryBN m [(Lbl, Prob, Prob)]
 getPs ls
   = do
     pvs <- mapM bnDataFusion ls
