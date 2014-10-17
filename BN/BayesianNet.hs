@@ -265,6 +265,13 @@ bnGetObs lbl
 -- TODO: IMPLEMENT!!!
 
 -----------------------------------------------------------------------------------------------
+-- * Recursive Conditioning
+
+-- TODO: implement!
+bnRecursiveCond :: (M m) => Lbl -> BN m Val
+bnRecursiveCond = undefined
+
+-----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Specifics (lowlevel)
 --
 -- This is a very low level and will trigger a lot of repeated computations.
