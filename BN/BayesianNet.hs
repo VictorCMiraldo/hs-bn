@@ -402,13 +402,21 @@ dirac :: Lbl -> Val -> [Val] -> Val -> Prob
 dirac n v vs i
   | i `elem` vs = if i == v then 1.0 else 0.0
   | otherwise   = error $ i ++ " should be an element of {" ++ unwords vs ++ "}"
-
-normalize :: (M m) => Type -> (Val -> Prob) -> BN m (Val -> Prob)
+    
+-- |Function Normalization
+normalize :: (M m) => Type -> (Val -> Prob) -> QueryBN m (Val -> Prob)
 normalize ty f
   = do
-    nvals <- __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
+    nvals <- lift $ __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
     let alpha = 1.0 / sum (map f nvals)
     return (\v -> alpha * f v)
+    
+-- |Isomorphism between functions and maps.
+bnTabulate :: (M m) => Lbl -> (Val -> Prob) -> QueryBN m [(Val, Prob)]
+bnTabulate l f
+  = do
+    tys <- lift $ __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
+    return [ (i, f i) | i <- tys ]
     
 -----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Low Level Interface
@@ -551,8 +559,8 @@ memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
 -}
 
 -- |Memoization wrapper for messages.
-memoParm :: (M m) => Parm -> BayesT m (Val -> Prob)
-memoParm p = memol3 runMsg' p >>= return . untabulate
+memoParm :: (M m) => Parm -> QueryBN m (Val -> Prob)
+memoParm p = memo runMsg' p >>= return . untabulate
   where 
     runMsg' p = traceMe p >> runMsg p
   
@@ -562,27 +570,21 @@ memoParm p = memol3 runMsg' p >>= return . untabulate
     traceMe _ = return ()
 #endif
 
-    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
-    runMsg (PLamC v)    = pLamC v    >>= tabulate v
-    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
-    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    runMsg (PLam vi vo) = pLam vi vo >>= bnTabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= bnTabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= bnTabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= bnTabulate v
     
     untabulate :: [(Val, Prob)] -> Val -> Prob
     untabulate tab v
       = (M.fromList tab) M.! v
       
-tabulate :: (M m) => Lbl -> (Val -> Prob) -> BN m [(Val, Prob)]
-tabulate l f
-  = do
-    tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
-    return [ (i, f i) | i <- tys ]
-
 -- ** Data Fusion Lemma
 
-bnDataFusion :: (M m) => Lbl -> BayesT m (Val -> Prob)
+bnDataFusion :: (M m) => Lbl -> QueryBN m (Val -> Prob)
 bnDataFusion lbl
   = do
-    ty <- bnodeVarType <$> __bnGetNode lbl
+    ty <- lift $ bnodeVarType <$> __bnGetNode lbl
     l  <- lamC lbl
     p  <- piC  lbl
     normalize ty (prod [p, l])
