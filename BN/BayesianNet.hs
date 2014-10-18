@@ -517,8 +517,6 @@ pLam vi vo
 -- |Computes the compound diagnostic parameter for a given node.
 pLamC :: (M m) => Lbl -> QueryBN m (Val -> Prob)
 pLamC v = lift (__bnGraphF $ esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
-pLamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
-pLamC v = __bnGraphF (esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
 
 -----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Interface
