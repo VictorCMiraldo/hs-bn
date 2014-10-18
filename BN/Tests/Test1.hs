@@ -41,6 +41,12 @@ test2ok
         bnObserve "v2" "T"
         getPs ["v1", "v2", "v3", "v4", "v5"])
     putStrLn . show $ ps
+    
+test3rec :: Lbl -> IO ()
+test3rec v
+  = do
+    let (Right ps) = runTestBayesT (setupOk >> bnRecursiveCond v)
+    mapM_ (putStrLn . show . ps) ["T", "F"]
 
 -----------------------------------------------------------------------------------------------
 -- * Setup Testing

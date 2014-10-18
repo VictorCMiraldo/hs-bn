@@ -267,9 +267,22 @@ bnGetObs lbl
 -----------------------------------------------------------------------------------------------
 -- * Recursive Conditioning
 
--- TODO: implement!
-bnRecursiveCond :: (M m) => Lbl -> BN m Val
-bnRecursiveCond = undefined
+bnRecursiveCond :: (M m) => Lbl -> BN m (Val -> Prob)
+bnRecursiveCond v
+  = do
+    ps  <- S.toList              <$> __bnGraphF (esNodeRho v)
+    fps <- (M.fromList . zip ps) <$> mapM bnRecursiveCond ps
+    cps <- __bnTyL (tyConfs ps) >>= maybe (panic "bnRecursiveCond") return
+    pv  <- mapM (marginalize fps) cps
+    return $ summ pv
+  where
+    marginalize fps c
+      = do
+        g <- bnGammaLkup v c
+        let r = foldr (\(plbl, val) r -> (fps M.! plbl) val * r) 1 c
+        return $ \b -> r * g b
+    
+    
 
 -----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Specifics (lowlevel)
