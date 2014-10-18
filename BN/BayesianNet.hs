@@ -53,6 +53,7 @@ module BN.BayesianNet(
   
   -- ** Edit
   , gammaAddNames
+  , bnGammaLkup
   , bnAddNode
   , bnAddArc
   , bnSetGamma
@@ -134,10 +135,15 @@ type IMap = EdgeSet (Lbl, Lbl) Lbl
 
 -- |Network specific data
 data BayesianNetData = BND
-  { bnnodes  :: M.Map Lbl BNode
-  , bngraph  :: IMap
-  , bnobs    :: [Lbl]
+  { bnnodes :: M.Map Lbl BNode
+  , bngraph :: IMap
+  , bnobs   :: [Lbl]
   }
+  
+-- |Loop cutset data
+type LCSData = M.Map Lbl (Val -> Prob)
+  
+-- |State Monadic wrapper
 
 -- |Represents a compiled network.  
 data CompiledBN
@@ -322,47 +328,35 @@ bnCompile
     return (CBN net tys)
       
 -----------------------------------------------------------------------------------------------
--- * Mathematical Utilities
-
--- |Compute the product of a list of functions
-prod :: [Val -> Prob] -> Val -> Prob
-prod fs b = foldr (\h r -> h b * r) 1 fs
-
--- |Computes the summation of a list of functions
-summ :: [Val -> Prob] -> Val -> Prob
-summ fs b = foldr (\h r -> h b + r) 0 fs
-
--- |Dirac function
-dirac :: Lbl -> Val -> [Val] -> Val -> Prob
-dirac n v vs i
-  | i `elem` vs = if i == v then 1.0 else 0.0
-  | otherwise   = error $ i ++ " should be an element of {" ++ unwords vs ++ "}"
-
--- |Function Normalization
-normalize :: (M m) => Type -> (Val -> Prob) -> QueryBN m (Val -> Prob)
-normalize ty f
-  = do
-    nvals <- lift $ __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
-    let alpha = 1.0 / sum (map f nvals)
-    return (\v -> alpha * f v)
-    
--- |Isomorphism between functions and maps.
-bnTabulate :: (M m) => Lbl -> (Val -> Prob) -> QueryBN m [(Val, Prob)]
-bnTabulate l f
-  = do
-    tys <- lift $ __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
-    return [ (i, f i) | i <- tys ]
-                        
------------------------------------------------------------------------------------------------
 -- * Loop Cutset
 
 -- TODO: IMPLEMENT!!!
 
 -----------------------------------------------------------------------------------------------
--- * Pearl's Algorithm
+-- * Recursive Conditioning
+
+bnRecursiveCond :: (M m) => Lbl -> BN m (Val -> Prob)
+bnRecursiveCond v
+  = do
+    ps  <- S.toList              <$> __bnGraphF (esNodeRho v)
+    fps <- (M.fromList . zip ps) <$> mapM bnRecursiveCond ps
+    cps <- __bnTyL (tyConfs ps) >>= maybe (panic "bnRecursiveCond") return
+    pv  <- mapM (marginalize fps) cps
+    return $ summ pv
+  where
+    marginalize fps c
+      = do
+        g <- bnGammaLkup v c
+        let r = foldr (\(plbl, val) r -> (fps M.! plbl) val * r) 1 c
+        return $ \b -> r * g b
+    
+    
+
+-----------------------------------------------------------------------------------------------
+-- * Pearl's Algorithm Specifics (lowlevel)
 --
 -- This is a very low level and will trigger a lot of repeated computations.
--- These functions are used as building blocks for the higher level 'QueryBN'.
+-- These functions are used as building blocks for the higher level 'BayesT'.
 
 instance M m => M (MemoT i v m) where
 
@@ -396,66 +390,25 @@ piC, lamC :: (M m) => Lbl -> QueryBN m (Val -> Prob)
 piC  v = memoParm (PPiC v)
 lamC v = memoParm (PLamC v)
 
---
--- This interface adds memoization to the stir.
+-- ** Internal utilities
 
-{-
+prod :: [Val -> Prob] -> Val -> Prob
+prod fs b = foldr (\h r -> h b * r) 1 fs
 
--- TODO: template for using ArrayCache's as memoization framework.
--- TODO: use a monad writter to trace messages?
+summ :: [Val -> Prob] -> Val -> Prob
+summ fs b = foldr (\h r -> h b + r) 0 fs
 
-indexParm :: (M m) => Parm -> BN m Int
-indexParm = undefined
+dirac :: Lbl -> Val -> [Val] -> Val -> Prob
+dirac n v vs i
+  | i `elem` vs = if i == v then 1.0 else 0.0
+  | otherwise   = error $ i ++ " should be an element of {" ++ unwords vs ++ "}"
 
-unindexParm :: (M m) => Int -> BN m Parm
-unindexParm = undefined
-    
--- |Memoization wrapper for messages.
-memoParm :: (M m) => Parm -> BN (MemoT Int [(Val, Prob)] m) (Val -> Prob)
-memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
-  where
-    runMsgIndexed p = unindexParm p >>= runMsg
-  
-    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
-    runMsg (PLamC v)    = pLamC v    >>= tabulate v
-    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
-    runMsg (PPiC v)     = pPiC v     >>= tabulate v
-    
-    untabulate :: [(Val, Prob)] -> Val -> Prob
-    untabulate tab v
-      = (M.fromList tab) M.! v
--}
-
--- |Memoization wrapper for messages.
-memoParm :: (M m) => Parm -> QueryBN m (Val -> Prob)
-memoParm p = memo runMsg' p >>= return . untabulate
-  where 
-    runMsg' p = traceMe p >> runMsg p
-  
-#ifdef MSG_TRACE
-    traceMe p = T.trace (show p) (return ())
-#else
-    traceMe _ = return ()
-#endif
-
-    runMsg (PLam vi vo) = pLam vi vo >>= bnTabulate vi
-    runMsg (PLamC v)    = pLamC v    >>= bnTabulate v
-    runMsg (PPi vi vo)  = pPi vi vo  >>= bnTabulate vi
-    runMsg (PPiC v)     = pPiC v     >>= bnTabulate v
-    
-    untabulate :: [(Val, Prob)] -> Val -> Prob
-    untabulate tab v
-      = (M.fromList tab) M.! v
-
--- ** Data Fusion Lemma
-
-bnDataFusion :: (M m) => Lbl -> QueryBN m (Val -> Prob)
-bnDataFusion lbl
+normalize :: (M m) => Type -> (Val -> Prob) -> BN m (Val -> Prob)
+normalize ty f
   = do
-    ty <- lift $ bnodeVarType <$> __bnGetNode lbl
-    l  <- lamC lbl
-    p  <- piC  lbl
-    normalize ty (prod [p, l])
+    nvals <- __bnTyL (tyVals ty) >>= maybe (panic "normalize") return
+    let alpha = 1.0 / sum (map f nvals)
+    return (\v -> alpha * f v)
     
 -----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Low Level Interface
@@ -564,6 +517,77 @@ pLam vi vo
 -- |Computes the compound diagnostic parameter for a given node.
 pLamC :: (M m) => Lbl -> QueryBN m (Val -> Prob)
 pLamC v = lift (__bnGraphF $ esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
+pLamC :: (M m) => Lbl -> BayesT m (Val -> Prob)
+pLamC v = __bnGraphF (esNodeSigma v) >>= mapM (lam v) . S.toList >>= return . prod
+
+-----------------------------------------------------------------------------------------------
+-- * Pearl's Algorithm Interface
+--
+-- This interface adds memoization to the stir.
+
+{-
+
+-- TODO: template for using ArrayCache's as memoization framework.
+-- TODO: use a monad writter to trace messages?
+
+indexParm :: (M m) => Parm -> BN m Int
+indexParm = undefined
+
+unindexParm :: (M m) => Int -> BN m Parm
+unindexParm = undefined
+    
+-- |Memoization wrapper for messages.
+memoParm :: (M m) => Parm -> BN (MemoT Int [(Val, Prob)] m) (Val -> Prob)
+memoParm p = indexParm p >>= memol3 runMsgIndexed >>= return . untabulate
+  where
+    runMsgIndexed p = unindexParm p >>= runMsg
+  
+    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= tabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    
+    untabulate :: [(Val, Prob)] -> Val -> Prob
+    untabulate tab v
+      = (M.fromList tab) M.! v
+-}
+
+-- |Memoization wrapper for messages.
+memoParm :: (M m) => Parm -> BayesT m (Val -> Prob)
+memoParm p = memol3 runMsg' p >>= return . untabulate
+  where 
+    runMsg' p = traceMe p >> runMsg p
+  
+#ifdef MSG_TRACE
+    traceMe p = T.trace (show p) (return ())
+#else
+    traceMe _ = return ()
+#endif
+
+    runMsg (PLam vi vo) = pLam vi vo >>= tabulate vi
+    runMsg (PLamC v)    = pLamC v    >>= tabulate v
+    runMsg (PPi vi vo)  = pPi vi vo  >>= tabulate vi
+    runMsg (PPiC v)     = pPiC v     >>= tabulate v
+    
+    untabulate :: [(Val, Prob)] -> Val -> Prob
+    untabulate tab v
+      = (M.fromList tab) M.! v
+      
+tabulate :: (M m) => Lbl -> (Val -> Prob) -> BN m [(Val, Prob)]
+tabulate l f
+  = do
+    tys <- __bnTyL (tyValsFor l) >>= maybe (panic "tabulate") return
+    return [ (i, f i) | i <- tys ]
+
+-- ** Data Fusion Lemma
+
+bnDataFusion :: (M m) => Lbl -> BayesT m (Val -> Prob)
+bnDataFusion lbl
+  = do
+    ty <- bnodeVarType <$> __bnGetNode lbl
+    l  <- lamC lbl
+    p  <- piC  lbl
+    normalize ty (prod [p, l])
      
      
         

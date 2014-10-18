@@ -13,6 +13,9 @@ import qualified Data.Map as M
 runTest :: BN Identity a -> Either BError a
 runTest f = runIdentity $ runBN [("bool", ["T", "F"])] f
 
+runTestBayesT :: BayesT Identity a -> Either BError a
+runTestBayesT f = runIdentity $ runBayesT [("bool", ["T", "F"])] f
+
 {-
     Right [("v1",0.2,0.8),("v2",0.32000002,0.68),("v3",0.42400002,0.57600003),("v4",0.27112,0.72888),("v5",0.45,0.55)]
     

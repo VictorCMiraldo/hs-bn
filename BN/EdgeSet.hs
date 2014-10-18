@@ -10,6 +10,8 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.List as L
 
+import Data.Function(on)
+
 import Test.QuickCheck hiding ((><))
 
 --------------------------------------------------------------------------------
@@ -103,10 +105,18 @@ e ++> es = esAddEdge e es
 -- |Returns the node indexes registered in the given edge set.
 esNodes :: (IsEdge e i) => EdgeSet e i -> [i]
 esNodes (ES mi mo) = M.keys mi `L.union` M.keys mo
+
+-- |Returns the number of nodes in a graph
+esSize :: (IsEdge e i) => EdgeSet e i -> Int
+esSize = length . esNodes
     
 -- |Get's the incomming arcs of a node
 esGetIns :: (IsEdge e i) => i -> EdgeSet e i -> S.Set e
 esGetIns v = maybe S.empty id . M.lookup v . edgesIn
+
+-- |Return the indegree of a node.
+esGetInDeg :: (IsEdge e i) => i -> EdgeSet e i -> Int
+esGetInDeg v = S.size . esGetIns v
 
 -- |We can also retrieve a given node parents
 esNodeRho :: (IsEdge e i) => i -> EdgeSet e i -> S.Set i
@@ -120,6 +130,10 @@ esNodeRhoStar v es = star (flip esNodeRho es) v
 esGetOuts :: (IsEdge e i) => i -> EdgeSet e i -> S.Set e
 esGetOuts v = maybe S.empty id . M.lookup v . edgesOut
 
+-- |Return the outdegree of a node.
+esGetOutDeg :: (IsEdge e i) => i -> EdgeSet e i -> Int
+esGetOutDeg v = S.size . esGetOuts v
+
 -- |Or, similarly, a node children
 esNodeSigma :: (IsEdge e i) => i -> EdgeSet e i -> S.Set i
 esNodeSigma v = S.map edgeDst . esGetOuts v
@@ -127,6 +141,10 @@ esNodeSigma v = S.map edgeDst . esGetOuts v
 -- |Transitive closure of 'esNodeRho'
 esNodeSigmaStar :: (IsEdge e i) => i -> EdgeSet e i -> S.Set i
 esNodeSigmaStar v es = star (flip esNodeSigma es) v
+
+-- |Returns the degree of a node.
+esGetDegree :: (IsEdge e i) => i -> EdgeSet e i -> Int
+esGetDegree v = uncurry (+) . split (esGetInDeg v) (esGetOutDeg v)
 
 --------------------------------------------------------------------------------
 -- * General Uility
@@ -141,6 +159,81 @@ star f i = staraux (S.singleton i) S.empty (f i)
         in if S.null ts
            then aux
            else staraux (S.union done ts) (S.union r' aux) r'
+           
+--------------------------------------------------------------------------------
+-- * Loop Cutset calculation
+{-
+
+Let G be a graph, we'll compute one loop cutset Cs using the following
+heuristic:
+
+Proc Loop-cutset(G, Cs):
+  while there are nodes in G do:
+    if vi \in G && degree(vi) \leq 1
+    then select vi
+    else get all nodes with indegree <= 1 (let these be the candidates)
+         select a vi from the candidates with the minimal degree.
+         add vi to Cs
+    Delete vi
+    
+-}
+
+-- |Returns the loop cutset of a graph
+esGetCutset :: (IsEdge e i) => EdgeSet e i -> [i]
+esGetCutset es = cutset es []
+  where
+    cutset es c
+      | esSize es == 0 = c
+      | otherwise
+        = let
+          ns = esNodes es
+          (dels, ns') = L.partition ((<= 1) . flip esGetDegree es) ns
+        in case dels of
+            -- no dangling nodes, let's choose a node with minimal degree.
+            [] -> let
+                    (cs, _) = L.partition ((<= 1) . flip esGetInDeg es) ns
+                    t       = head $ reverse $ L.sortBy (compare `on` (flip esGetDegree es)) cs
+                  in cutset (esRmvNode t es) (t:c)
+            
+            -- dangling nodes! Just remove them and iterate.        
+            _  -> cutset (foldr esRmvNode es dels) c
+
+-- |Symbol ring graph    
+lcs_t1 :: EdgeSet (Int, Int) Int
+lcs_t1 = (1, 2)
+     ++> (1, 3)
+     ++> (2, 4)
+     ++> (3, 4)
+     ++> esEmpty
+            
+-- |Slide 204
+lcs_t2 :: EdgeSet (Int, Int) Int
+lcs_t2 = (1, 3)
+     ++> (3, 2)
+     ++> (3, 4)
+     ++> (5, 4)
+     ++> (5, 6)
+     ++> (4, 7)
+     ++> (6, 7)
+     ++> (7, 8)
+     ++> (7, 10)
+     ++> (7, 9)
+     ++> (8, 10)
+     ++> (9, 10)
+     ++> (9, 11)
+     ++> esEmpty
+     
+-- |Pretzel
+lcs_t3 :: EdgeSet (Int, Int) Int
+lcs_t3 = (5, 2)
+     ++> (5, 6)
+     ++> (2, 7)
+     ++> (6, 7)
+     ++> lcs_t1
+     
+-- |Loopless big graph
+lcs_t4 :: EdgeSet (Int, Int) Int
+lcs_t4 = foldr (++>) esEmpty [ (i-1, i) | i <- [2..50] ]
 
 --------------------------------------------------------------------------------
 -- * QuickCheck Properties
