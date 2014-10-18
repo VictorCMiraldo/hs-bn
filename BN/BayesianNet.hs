@@ -90,20 +90,26 @@ bnodeDummyName l = '_':'_':l
 
 type IMap = EdgeSet (Lbl, Lbl) Lbl
   
+-- |The data we need to maintain a Bayesian Network.
 data BayesianNetData = BND
-  { bnnodes :: M.Map Lbl BNode
-  , bngraph :: IMap
-  , bnobs   :: [Lbl]
+  { bnnodes :: M.Map Lbl BNode -- ^ Node label and associated data.
+  , bngraph :: IMap            -- ^ Graph Structure
+  , bnobs   :: [Lbl]           -- ^ Observations
   }
   
+-- |Loop cutset data
+type LCSData = M.Map Lbl (Val -> Prob)
+  
+-- |State Monadic wrapper
 type BN m = StateT BayesianNetData (Err (Ty m))
 
+-- |Suggaring instance
 instance M m => M (BN m) where
 
 -- ** Unwrapping
 
 runBN :: (M m) => [(Type, [Val])] -> BN m a -> m (Either BError a)
-runBN tys = runTyped tys . runExceptT . flip evalStateT (BND M.empty esEmpty [])
+runBN tys = runTyped tys . runExceptT . flip evalStateT (BND M.empty esEmpty [] Nothing)
   
 -- *** Network private interface
 
