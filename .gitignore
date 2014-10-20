@@ -9,6 +9,9 @@
 *.agdai
 *.aux
 *.tex
+
+# Diff reseults #
+*.orig
  
 # Packages #
 ############
