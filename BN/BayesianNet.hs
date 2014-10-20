@@ -58,6 +58,7 @@ module BN.BayesianNet(
   , bnAddArc
   , bnSetGamma
   , bnCompile
+  , bnPrepareQuery
   
   -- ** Observation
   , bnObserve  
@@ -66,11 +67,13 @@ module BN.BayesianNet(
   
   -- ** Querying
   , bnDataFusion
+  , bnRecursiveCond 
+  , bnMarginalizeLCS
   )
   where
 
 -- #define MSG_DOMAIN_CHECK 1
--- #define MSG_TRACE        1
+#define MSG_TRACE        1
 
 import Prelude hiding (pi)
 
@@ -133,21 +136,26 @@ bnodeDummyName l = '_':'_':l
 -- |Imaps
 type IMap = EdgeSet (Lbl, Lbl) Lbl
 
+-- |Loop cutset data. Keeps, for each node in the graph loop cutset
+--  it's prior probability assessment.
+type LCSData = M.Map Lbl (Val -> Prob)
+
 -- |Network specific data
 data BayesianNetData = BND
-  { bnnodes :: M.Map Lbl BNode
-  , bngraph :: IMap
-  , bnobs   :: [Lbl]
+  { bnnodes :: M.Map Lbl BNode -- ^ Label |-> node data.
+  , bngraph :: IMap            -- ^ Graph structure, over labels.
+  , bnobs   :: [Lbl]           -- ^ Observed nodes
+  , bnlcs   :: LCSData         -- ^ Loop Cutset
+  , bnquery :: Bool            -- ^ Query mode?
   }
-  
--- |Loop cutset data
-type LCSData = M.Map Lbl (Val -> Prob)
   
 -- |State Monadic wrapper
 
 -- |Represents a compiled network.  
-data CompiledBN
-  = CBN BayesianNetData TyDict
+data CompiledBN = CBN
+  { cbnNet :: BayesianNetData 
+  , cbnEnv :: TyDict
+  }
 
 -- |Encapsulates a network inside state-monads to make life easier.  
 type BN m = StateT BayesianNetData (Err (Ty m))
@@ -160,10 +168,11 @@ instance M m => M (BN m) where
 
 -- |Runs a Bayesian-network computation
 runBN :: (M m) => [(Type, [Val])] -> BN m a -> m (Either BError a)
-runBN tys = runTyped tys . runExceptT . flip evalStateT (BND M.empty esEmpty [])
+runBN tys = runTyped tys . runExceptT . flip evalStateT (BND M.empty esEmpty [] M.empty True)
 
+-- |Same as above, but explicetely receives the type-dict.
 runBN' :: (M m) => TyDict -> BN m a -> m (Either BError a)
-runBN' tdict = runTypedFor tdict . runExceptT . flip evalStateT (BND M.empty esEmpty [])
+runBN' tdict = runTypedFor tdict . runExceptT . flip evalStateT (BND M.empty esEmpty [] M.empty True)
   
 -- *** Network private interface
 
@@ -231,7 +240,9 @@ bnAddNode n ty
     -- assert that we know about this type.
     assertM_ (__bnTyL $ tyTyIsDecl ty)
     __bnTyL (tyDeclVar n ty)
-    modify (\s -> s { bnnodes = M.insert n (BNodeVar n ty M.empty) (bnnodes s) } )
+    modify (\s -> s { bnnodes = M.insert n (BNodeVar n ty M.empty) (bnnodes s) 
+                    , bnquery = False
+                    } )
 
 -- |Adds an arc between two existing nodes.
 bnAddArc :: (M m) => Lbl -> Lbl -> BN m ()
@@ -239,7 +250,9 @@ bnAddArc n m
   = do
     -- assert that both nodes exists.
     mapM_ __bnGetNode [n, m]
-    modify (\s -> s { bngraph = esAddEdge (n, m) (bngraph s) })
+    modify (\s -> s { bngraph = esAddEdge (n, m) (bngraph s) 
+                    , bnquery = False
+                    })
 
 -- |Sets the assessment function for a given node.
 --  Will perform both a length check and a semantic check.
@@ -261,7 +274,9 @@ bnSetGamma n t
     when (M.size t /= nrhoTysCard)
       $ errLoc ("BN.BayesianNet.bnSetGamma " ++ n ++ ":") $ "Expected " ++ show nrhoTysCard ++ " parameters."
       
-    modify (\s -> s { bnnodes = M.alter (maybe Nothing (\n -> Just n{ bnodeVarGamma = t })) n (bnnodes s) })
+    modify (\s -> s { bnnodes = M.alter (maybe Nothing (\n -> Just n{ bnodeVarGamma = t })) n (bnnodes s) 
+                    , bnquery = False
+                    })
     
     -- is this table correct? do the proper parameters sum to 1, as they're supposed to?
     (Just nvals) <- __bnTyL (tyVals (bnodeVarType n'))
@@ -284,6 +299,7 @@ bnSetGamma n t
 bnObserve :: (M m) => Lbl -> Val -> BN m ()
 bnObserve lbl val
   = do
+    assertM_ (bnquery <$> get) -- the network must be in query mode.
     assertM_ (__bnTyF (tyValidVal val) lbl)
     let n  = BNodeDummy lbl val
     let nl = bnodeLbl n
@@ -298,6 +314,8 @@ bnObserve lbl val
 bnClear :: (M m) => Lbl -> BN m () 
 bnClear lbl
   = do
+    assertM_ (bnquery <$> get)
+    
     -- we can only remove an observed node.
     hasobs <- (lbl `elem`) . bnobs <$> get
     when hasobs
@@ -319,38 +337,50 @@ bnGetObs lbl
                  $ M.lookup (bnodeDummyName lbl) (bnnodes s)
       else return Nothing
       
+bnPrepareQuery :: (M m) => BN m ()
+bnPrepareQuery
+  = do
+    lcs <- __bnGraphF esGetCutset
+    fs  <- M.fromList . zip lcs <$> mapM bnRecursiveCond lcs
+    modify (\s -> s { bnlcs = fs 
+                    , bnquery = True
+                    })
+                    
+    
+      
 -- |Returns the current network data.
 bnCompile :: (M m) => BN m CompiledBN
 bnCompile
   = do
-    net <- get
+    bnPrepareQuery
+    net <- get    
     tys <- lift $ lift get
     return (CBN net tys)
       
------------------------------------------------------------------------------------------------
--- * Loop Cutset
-
--- TODO: IMPLEMENT!!!
-
 -----------------------------------------------------------------------------------------------
 -- * Recursive Conditioning
 
 bnRecursiveCond :: (M m) => Lbl -> BN m (Val -> Prob)
 bnRecursiveCond v
   = do
-    ps  <- S.toList              <$> __bnGraphF (esNodeRho v)
-    fps <- (M.fromList . zip ps) <$> mapM bnRecursiveCond ps
-    cps <- __bnTyL (tyConfs ps) >>= maybe (panic "bnRecursiveCond") return
-    pv  <- mapM (marginalize fps) cps
-    return $ summ pv
+    obs <- bnobs <$> get
+    if v `elem` obs
+      then do
+        vn <- __bnGetNode (bnodeDummyName v)
+        ts <- __bnTyL (tyValsFor v) >>= maybe (panic "bnRecursiceCond.tyValsFor") return
+        return (dirac v (bnodeDummyVal vn) ts)
+      else do
+        ps  <- S.toList              <$> __bnGraphF (esNodeRho v)
+        fps <- (M.fromList . zip ps) <$> mapM bnRecursiveCond ps
+        cps <- __bnTyL (tyConfs ps) >>= maybe (panic "bnRecursiveCond.TyConfs") return
+        pv  <- mapM (marginalize fps) cps
+        return $ summ pv
   where
     marginalize fps c
       = do
         g <- bnGammaLkup v c
         let r = foldr (\(plbl, val) r -> (fps M.! plbl) val * r) 1 c
         return $ \b -> r * g b
-    
-    
 
 -----------------------------------------------------------------------------------------------
 -- * Pearl's Algorithm Specifics (lowlevel)
@@ -579,11 +609,43 @@ memoParm p = memo runMsg' p >>= return . untabulate
     untabulate tab v
       = (M.fromList tab) M.! v
       
+-----------------------------------------------------------------------------------------------
+-- * Utilities
+
+bnAssertQueryMode :: (M m) => QueryBN m ()
+bnAssertQueryMode = assertM_ (bnquery <$> lift get)   
+
+-- |Marginalize the calculations based on the loop cutset.
+bnMarginalizeLCS :: (M m) => QueryBN m (Val -> Prob) -> QueryBN m (Val -> Prob)
+bnMarginalizeLCS m 
+  = do
+    lcs <- lift (bnlcs <$> get)
+    obs <- lift (bnobs <$> get)
+    ts  <- lift (__bnTyL (tyConfs $ (M.keys lcs) \\ obs))
+           >>= maybe (lift $ panic "bnMarginalizeLCS") return
+    fs  <- mapM (calc lcs m) ts
+    return $ summ fs
+  where
+    calc :: (M m) => LCSData -> QueryBN m (Val -> Prob) -> [(String, String)] -> QueryBN m (Val -> Prob)
+    calc lcs m t
+      = do
+        -- now, we add the observations
+        lift $ mapM_ (uncurry bnObserve) t 
+        -- calculate whatever we need:
+        res <- m
+        lift $ mapM_ (bnClear . fst) t
+        return (\b -> res b * factor lcs t)
+        
+    factor :: LCSData -> [(String, String)] -> Prob
+    factor lcs t = T.trace (show (M.keys lcs) ++ "\n\t" ++ show t) $
+      product (map (\(l, v) -> (lcs M.! l) v) t)
+      
 -- ** Data Fusion Lemma
 
 bnDataFusion :: (M m) => Lbl -> QueryBN m (Val -> Prob)
 bnDataFusion lbl
   = do
+    bnAssertQueryMode
     ty <- lift $ bnodeVarType <$> __bnGetNode lbl
     l  <- lamC lbl
     p  <- piC  lbl

@@ -51,6 +51,8 @@ class (Functor m, Monad m, Applicative m)
       
 instance M Identity where
 
+instance M IO where
+
 -----------------------------------------------------------------------------------------------
 -- * Synonyms
 
@@ -70,10 +72,12 @@ errLoc :: (MonadError BError m) => String -> String -> m a
 errLoc s l = throwError $ BErrStrLoc s l
 
 assertM :: (M m) => m Bool -> m a -> m a
+{-# INLINE assertM #-}
 assertM pred val
   = do
     b <- pred
     assert b val
     
 assertM_ :: (M m) => m Bool -> m ()
+{-# INLINE assertM_ #-}
 assertM_ pred = assertM pred (return ())
